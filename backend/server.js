@@ -8,15 +8,17 @@ app.use(helmet());
 app.use(cors());
 app.use(express.json());
 
-// BUG #1: Wrong default password — does not match docker-compose.yml!
-// STUDENT FIX: Change 'wrongpassword' to 'bugpassword' (or use env var properly)
+// FIX #1: the default password now matches .env.example / docker-compose.yml.
+//   In Docker and CI the real value always comes from the DB_PASSWORD env var.
 const pool = new Pool({
   user:     process.env.DB_USER     || 'postgres',
   host:     process.env.DB_HOST     || 'localhost',
   database: process.env.DB_NAME     || 'bugdb',
-  password: process.env.DB_PASSWORD || 'wrongpassword',
+  password: process.env.DB_PASSWORD || 'bugpassword',
   port:     parseInt(process.env.DB_PORT) || 5432,
 });
+
+const VALID_STATUSES = ['open', 'in_progress', 'closed'];
 
 // ── Health ──────────────────────────────────────────────────────────────────
 app.get('/health', (req, res) => {
@@ -41,17 +43,15 @@ app.get('/api/bugs', async (req, res) => {
 });
 
 // ── POST /api/bugs ───────────────────────────────────────────────────────────
-// BUG #2: No validation — empty / whitespace-only titles are accepted.
-// STUDENT FIX: Check that title is a non-empty, non-whitespace string.
-//   Return HTTP 400 with { error: "Title is required" } when invalid.
+// FIX #2: reject a missing, empty or whitespace-only title with HTTP 400.
+//   The typeof check also stops a non-string title (e.g. 123) from crashing .trim().
 app.post('/api/bugs', async (req, res) => {
   try {
     const { title, status = 'open' } = req.body;
 
-    // STUDENT FIX: Add validation here
-    // if (!title || !title.trim()) {
-    //   return res.status(400).json({ error: 'Title is required' });
-    // }
+    if (typeof title !== 'string' || !title.trim()) {
+      return res.status(400).json({ error: 'Title is required' });
+    }
 
     const result = await pool.query(
       'INSERT INTO bugs (title, status) VALUES ($1, $2) RETURNING *',
@@ -63,33 +63,64 @@ app.post('/api/bugs', async (req, res) => {
   }
 });
 
-// BUG #3: DELETE endpoint is missing — but tests expect it!
-// STUDENT TODO: Implement DELETE /api/bugs/:id
-//   - Query: DELETE FROM bugs WHERE id = $1 RETURNING *
-//   - Return 200 with the deleted row, or 404 if not found.
+// ── DELETE /api/bugs/:id ─────────────────────────────────────────────────────
+// FIX #3: delete one bug. 200 + the deleted row, or 404 if the id does not exist.
+app.delete('/api/bugs/:id', async (req, res) => {
+  try {
+    const result = await pool.query(
+      'DELETE FROM bugs WHERE id = $1 RETURNING *',
+      [req.params.id]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Bug not found' });
+    }
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
-// BUG #4: PUT endpoint is missing — but tests expect it!
-// STUDENT TODO: Implement PUT /api/bugs/:id
-//   - Accept { title, status } in the request body
-//   - Query: UPDATE bugs SET title=$1, status=$2 WHERE id=$3 RETURNING *
-//   - Return 200 with the updated row, or 404 if not found.
-//   - Valid status values: 'open', 'in_progress', 'closed'
+// ── PUT /api/bugs/:id ────────────────────────────────────────────────────────
+// FIX #4: update a bug's title and/or status. 200 + the updated row, or 404.
+//   COALESCE keeps the current value of any field left out of the body,
+//   so { status: 'closed' } on its own also works.
 //
 // OPTIONAL CHALLENGE: also accept a { severity } field in the body
 //   and store it in the database.  severity must be one of:
 //   'low', 'medium', 'high', 'critical'
+app.put('/api/bugs/:id', async (req, res) => {
+  try {
+    const { title, status } = req.body;
 
-// ── Server startup ───────────────────────────────────────────────────────────
-// BUG #5: Server starts unconditionally — this causes a port conflict when Jest
-//   imports this file, because supertest also binds a port.
-// STUDENT FIX: Wrap the listen() call so it only runs when this file is the
-//   entry-point, not when it is require()-d by a test.
-//   Hint: if (require.main === module) { app.listen(...) }
-const port = process.env.PORT || 8080;
-app.listen(port, () => {
-  console.log(`Bug Tracker backend running on port ${port}`);
+    if (title !== undefined && (typeof title !== 'string' || !title.trim())) {
+      return res.status(400).json({ error: 'Title is required' });
+    }
+    if (status !== undefined && !VALID_STATUSES.includes(status)) {
+      return res.status(400).json({ error: `Status must be one of: ${VALID_STATUSES.join(', ')}` });
+    }
+
+    const result = await pool.query(
+      'UPDATE bugs SET title = COALESCE($1, title), status = COALESCE($2, status) WHERE id = $3 RETURNING *',
+      [title, status, req.params.id]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Bug not found' });
+    }
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-// BUG #6: App is not exported — tests cannot import it!
-// STUDENT FIX: Add the line below (remove the comment characters):
-// module.exports = app;
+// ── Server startup ───────────────────────────────────────────────────────────
+// FIX #5: only listen when this file is run directly (`node server.js`).
+//   When Jest require()-s it, supertest binds its own port instead.
+if (require.main === module) {
+  const port = process.env.PORT || 8080;
+  app.listen(port, () => {
+    console.log(`Bug Tracker backend running on port ${port}`);
+  });
+}
+
+// FIX #6: export the app so the tests can import it.
+module.exports = app;
