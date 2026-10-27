@@ -1,0 +1,15 @@
+# Files Docker must NOT send into the build context / copy into the image.
+# node_modules: the image installs its own, built for Linux
+# build:        the image runs its own `npm run build`
+# .env:         secrets never belong in an image
+# .git:         history is not needed to build the app
+node_modules
+build
+npm-debug.log*
+.env
+.env.*
+.git
+.gitignore
+coverage
+Dockerfile
+.dockerignore

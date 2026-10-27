@@ -1,28 +1,34 @@
 # ===========================================
-# STUDENT TODO: Create a Multi-Stage Dockerfile
+# Backend image - multi-stage build
 # ===========================================
+# Stage 1 (deps):       install ONLY the production dependencies
+# Stage 2 (production): copy them + the source into a clean image
 #
-# Requirements:
-# 1. Stage 1 (builder):
-#    - Use node:24-alpine as base
-#    - Set working directory
-#    - Copy package files and install ALL dependencies
-#    - Copy source code
+# Only the last stage ends up in the final image, so npm's download cache
+# and anything else left behind in stage 1 is thrown away.
 #
-# 2. Stage 2 (production):
-#    - Use node:24-alpine as base
-#    - Set working directory
-#    - Copy only package files from builder
-#    - Install ONLY production dependencies (hint: npm ci --omit=dev)
-#    - Copy application code from builder
-#    - Run as the non-root user (USER node) and set NODE_ENV=production
-#    - Expose the correct port
-#    - Set the start command
-#
-# Hints:
-# - Research: "Docker multi-stage build Node.js"
-# - Use COPY --from=builder to copy between stages
-# - Final image should be as small as possible
+# Build & run on its own:
+#   docker build -t bug-tracker-backend ./backend
+#   docker run -p 8080:8080 -e DB_HOST=... bug-tracker-backend
 # ===========================================
 
-# YOUR CODE HERE:
+# ── Stage 1: install production dependencies ─────────────────────────────────
+FROM node:24-alpine AS deps
+WORKDIR /app
+# Copy only the package files first: this layer (and the slow npm ci below)
+# is reused from cache until package.json / package-lock.json change.
+COPY package.json package-lock.json ./
+# npm ci installs the exact versions from the lock file.
+# --omit=dev skips jest, supertest and nodemon - they are only needed for testing.
+RUN npm ci --omit=dev
+
+# ── Stage 2: lean runtime image ──────────────────────────────────────────────
+FROM node:24-alpine AS production
+ENV NODE_ENV=production
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+# Do not run as root: the official Node image ships a non-root user "node".
+USER node
+EXPOSE 8080
+CMD ["node", "server.js"]
