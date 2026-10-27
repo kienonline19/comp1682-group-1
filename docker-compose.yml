@@ -1,62 +1,96 @@
 # ===========================================
-# STUDENT TODO: Complete this Docker Compose file
+# Bug Tracker - the whole stack with one command
 # ===========================================
+#   cp .env.example .env          (once; .env is git-ignored - never commit it)
+#   docker compose up --build -d
 #
-# Requirements:
-# 1. Frontend service:
-#    - Build from ./frontend directory
-#    - Expose port 3000
-#    - Pass REACT_APP_API_URL as a build arg (default http://localhost:8080)
-#    - Should depend on backend being healthy (condition: service_healthy)
+#   Frontend  http://localhost:3000
+#   Backend   http://localhost:8080/health
 #
-# 2. Backend service:
-#    - Build from ./backend directory
-#    - Expose port 8080
-#    - Must have environment variables for database connection
-#    - Should depend on postgres and wait for it to be healthy
-#    - Add a healthcheck
+# Start order, enforced by depends_on + healthchecks:
+#   postgres (healthy) -> backend (healthy) -> frontend
 #
-# 3. Postgres service:
-#    - Use postgres:15-alpine image
-#    - Set POSTGRES_DB / POSTGRES_USER / POSTGRES_PASSWORD from the .env file
-#      (copy .env.example to .env; use ${DB_NAME} etc. - no hard-coded passwords)
-#    - Publish 5432:5432 so you can run the backend tests from your laptop
-#    - Use a named volume for data persistence
-#    - Mount the init script from ./database/database.sql
-#    - Add a healthcheck
+# ${DB_PASSWORD} etc. are read from the .env file next to this file, so no
+# password is hard-coded here.
+#   ${VAR:-default}  use "default" when VAR is not set
+#   ${VAR:?message}  refuse to start, printing "message", when VAR is not set
 #
-# 4. Define named volumes
+# The production server (CD Option A) uses this same file with
+# `docker compose pull` + `docker compose up -d --no-build`: the image: names
+# point at Docker Hub, and IMAGE_TAG in the server's .env picks the version.
 #
-# Hints:
-# - Research: "docker-compose healthcheck"
-# - Research: "docker-compose depends_on condition"
-# - Database env vars for the backend: DB_HOST=postgres, DB_PORT=5432, and DB_NAME / DB_USER / DB_PASSWORD from .env
-# - The top-level 'version:' key is obsolete in Compose v2 - do not add it
-#
-# Example healthcheck:
-#   healthcheck:
-#      test: ['CMD-SHELL', 'pg_isready -U postgres -d bugdb']
-#      interval: 10s
-#      timeout: 5s
-#      retries: 5
+# database.sql only runs when the data volume is empty. If you change it
+# after the first start, run `docker compose down -v` (deletes all data).
 # ===========================================
 
 services:
-  # STUDENT TODO: Define frontend service
-  frontend:
-    build: ./frontend
-    # TODO: Add ports, depends_on
-
-  # STUDENT TODO: Define backend service
-  backend:
-    build: ./backend
-    # TODO: Add ports, environment, depends_on, healthcheck
-
-  # STUDENT TODO: Define postgres service
   postgres:
     image: postgres:15-alpine
-    # TODO: Add environment, ports, volumes, healthcheck
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-bugdb}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: "${DB_PASSWORD:?DB_PASSWORD is not set - copy .env.example to .env}"
+    ports:
+      # Lets the backend tests on your laptop reach the database.
+      # 127.0.0.1 = this machine only, so the database is never exposed to the
+      # internet (important on a VPS). Set POSTGRES_HOST_PORT in .env if 5432
+      # is already used by a local PostgreSQL install.
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      # Named volume: the data survives `docker compose down` and restarts
+      - postgres_data:/var/lib/postgresql/data
+      # Every *.sql in this folder runs once, when the database is first created
+      - ./database/database.sql:/docker-entrypoint-initdb.d/database.sql:ro
+    healthcheck:
+      # $$ = a literal $, so the variables are expanded inside the container
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
-# STUDENT TODO: Define named volumes
+  backend:
+    build: ./backend
+    image: ${DOCKER_HUB_USERNAME:-local}/bug-tracker-backend:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      PORT: 8080
+      DB_HOST: postgres          # the service name is its hostname on the compose network
+      DB_PORT: 5432              # the container port, not POSTGRES_HOST_PORT
+      DB_NAME: ${DB_NAME:-bugdb}
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: "${DB_PASSWORD:?DB_PASSWORD is not set - copy .env.example to .env}"
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy   # wait for pg_isready, not just "container started"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Baked into the JavaScript bundle at build time. It is the URL the
+        # user's *browser* calls, so it must be reachable from their machine.
+        REACT_APP_API_URL: ${REACT_APP_API_URL:-http://localhost:8080}
+    image: ${DOCKER_HUB_USERNAME:-local}/bug-tracker-frontend:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
 volumes:
   postgres_data:
